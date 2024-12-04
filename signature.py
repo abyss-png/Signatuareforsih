@@ -1,12 +1,68 @@
 # signature.py
 import cv2
+import os
+import tempfile
 from skimage.metrics import structural_similarity as ssim
+import requests
+from pdf2image import convert_from_path
+import numpy as np
+from urllib.parse import urlparse
+
+def is_cloudinary_url(url):
+    """Check if the URL is a Cloudinary URL"""
+    parsed = urlparse(url)
+    return 'cloudinary' in parsed.netloc
+
+def download_image(url):
+    """Download image from URL and return as OpenCV image"""
+    try:
+        response = requests.get(url, stream=True)
+        response.raise_for_status()
+        image_array = np.asarray(bytearray(response.content), dtype=np.uint8)
+        image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+        return image
+    except Exception as e:
+        print(f"Error downloading image: {str(e)}")
+        return None
+
+def extract_first_page_from_pdf(pdf_path):
+    """Convert first page of PDF to image"""
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            images = convert_from_path(pdf_path, output_folder=temp_dir, first_page=1, last_page=1)
+            if images:
+                # Save the first page temporarily
+                temp_image_path = os.path.join(temp_dir, 'temp_page.jpg')
+                images[0].save(temp_image_path, 'JPEG')
+                # Read with OpenCV
+                return cv2.imread(temp_image_path)
+    except Exception as e:
+        print(f"Error converting PDF: {str(e)}")
+        return None
+
+def load_image(path):
+    """Load image from various sources (local file, URL, or PDF)"""
+    try:
+        # Check if it's a URL
+        if path.startswith('http'):
+            return download_image(path)
+        
+        # Check if it's a PDF
+        if path.lower().endswith('.pdf'):
+            return extract_first_page_from_pdf(path)
+        
+        # Regular image file
+        return cv2.imread(path)
+    
+    except Exception as e:
+        print(f"Error loading image: {str(e)}")
+        return None
 
 def match(path1, path2):
     try:
-        # read the images
-        img1 = cv2.imread(path1)
-        img2 = cv2.imread(path2)
+        # Load the images from various possible sources
+        img1 = load_image(path1)
+        img2 = load_image(path2)
         
         if img1 is None or img2 is None:
             return -1  # Return -1 if images couldn't be loaded
@@ -32,8 +88,8 @@ def match(path1, path2):
         print(f"Error in matching: {str(e)}")
         return -1
 
-# main.py modifications - Updated checkSimilarity function
 def checkSimilarity(window, path1, path2):
+    """Check similarity between two signatures"""
     if not path1 or not path2:
         messagebox.showerror("Error", "Please select or capture both signatures!")
         return False
@@ -52,7 +108,6 @@ def checkSimilarity(window, path1, path2):
                           f"Signatures are {result:.1f}% similar!")
     return True
 
-# And update the capture_image_from_cam_into_temp function:
 def capture_image_from_cam_into_temp(sign=1):
     cam = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cam.isOpened():
