@@ -1,4 +1,3 @@
-# signature.py
 import cv2
 import os
 import tempfile
@@ -7,11 +6,27 @@ import requests
 from pdf2image import convert_from_path
 import numpy as np
 from urllib.parse import urlparse
+import cloudinary.uploader
+from tkinter import messagebox
 
 def is_cloudinary_url(url):
     """Check if the URL is a Cloudinary URL"""
     parsed = urlparse(url)
     return 'cloudinary' in parsed.netloc
+
+def save_signature_file(file_path, user_id):
+    """Upload a signature file to Cloudinary and return the file URL."""
+    try:
+        response = cloudinary.uploader.upload(
+            file_path,
+            public_id=f"signatures/{user_id}",
+            folder="signatures",
+            resource_type="auto"  # Auto-detect file type
+        )
+        return response.get("secure_url")
+    except Exception as e:
+        print(f"Error uploading file to Cloudinary: {str(e)}")
+        return None
 
 def download_image(url):
     """Download image from URL and return as OpenCV image"""
@@ -59,6 +74,7 @@ def load_image(path):
         return None
 
 def match(path1, path2):
+    """Match two images and calculate similarity"""
     try:
         # Load the images from various possible sources
         img1 = load_image(path1)
@@ -67,79 +83,67 @@ def match(path1, path2):
         if img1 is None or img2 is None:
             return -1  # Return -1 if images couldn't be loaded
             
-        # turn images to grayscale
+        # Turn images to grayscale
         img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
         img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
         
-        # resize images for comparison
+        # Resize images for comparison
         img1 = cv2.resize(img1, (300, 300))
         img2 = cv2.resize(img2, (300, 300))
         
-        # Create a window to display images side by side
+        # Display images side by side
         combined = cv2.hconcat([img1, img2])
         cv2.imshow("Signature Comparison", combined)
         cv2.waitKey(1000)  # Show for 1 second
         cv2.destroyAllWindows()
         
-        similarity_value = "{:.2f}".format(ssim(img1, img2)*100)
-        return float(similarity_value)
+        # Calculate similarity
+        similarity_value = ssim(img1, img2)
+        return round(similarity_value * 100, 2)
         
     except Exception as e:
         print(f"Error in matching: {str(e)}")
         return -1
 
-def checkSimilarity(window, path1, path2):
-    """Check similarity between two signatures"""
-    if not path1 or not path2:
-        messagebox.showerror("Error", "Please select or capture both signatures!")
-        return False
-        
-    result = match(path1=path1, path2=path2)
-    
-    if result == -1:
-        messagebox.showerror("Error", "Failed to process images. Please try again!")
-        return False
-        
-    if(result <= THRESHOLD):
-        messagebox.showerror("Failure: Signatures Do Not Match",
-                           f"Signatures are {result:.1f}% similar!")
-    else:
-        messagebox.showinfo("Success: Signatures Match",
-                          f"Signatures are {result:.1f}% similar!")
-    return True
-
 def capture_image_from_cam_into_temp(sign=1):
-    cam = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    if not cam.isOpened():
-        messagebox.showerror("Error", "Could not open camera!")
-        return False
+    """Capture an image from the camera and save it temporarily"""
+    try:
+        cam = cv2.VideoCapture(0)
+        if not cam.isOpened():
+            raise Exception("Could not access the camera.")
 
-    cv2.namedWindow("Camera Preview")
-    img_captured = False
+        cv2.namedWindow("Camera Preview")
+        img_captured = False
+        frame = None
 
-    while not img_captured:
-        ret, frame = cam.read()
-        if not ret:
-            messagebox.showerror("Error", "Failed to grab frame from camera!")
-            break
+        while True:
+            ret, frame = cam.read()
+            if not ret:
+                raise Exception("Failed to grab frame from the camera.")
+
+            cv2.imshow("Camera Preview", frame)
             
-        cv2.imshow("Camera Preview", frame)
-        
-        k = cv2.waitKey(1)
-        if k % 256 == 27:  # ESC pressed
-            break
-        elif k % 256 == 32:  # SPACE pressed
-            if not os.path.isdir('temp'):
-                os.makedirs('temp', exist_ok=True)
-                
-            img_name = f"./temp/test_img{sign}.png"
-            
-            if cv2.imwrite(filename=img_name, img=frame):
-                messagebox.showinfo("Success", "Image captured successfully!")
+            key = cv2.waitKey(1)
+            if key % 256 == 27:  # ESC key to exit
+                break
+            elif key % 256 == 32:  # SPACE key to capture
                 img_captured = True
-            else:
-                messagebox.showerror("Error", "Failed to save image!")
-                
-    cam.release()
-    cv2.destroyAllWindows()
-    return img_captured
+                break
+
+        # Release the camera and close the preview window
+        cam.release()
+        cv2.destroyAllWindows()
+
+        if img_captured and frame is not None:
+            # Save the captured image temporarily
+            temp_dir = "temp"
+            os.makedirs(temp_dir, exist_ok=True)
+            img_name = os.path.join(temp_dir, f"test_img{sign}.png")
+            cv2.imwrite(img_name, frame)
+            return img_name
+        else:
+            return None
+
+    except Exception as e:
+        print(f"Error capturing image: {str(e)}")
+        return None
