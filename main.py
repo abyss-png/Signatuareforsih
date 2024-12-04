@@ -1,201 +1,245 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 from pymongo import MongoClient
 from pymongo.errors import ConfigurationError
 from pymongo.server_api import ServerApi
-from datetime import datetime
 from dotenv import load_dotenv
+from signature import save_signature_file, match, is_cloudinary_url, capture_image_from_cam_into_temp
+import cloudinary
+import cloudinary.uploader
+import os
+import requests
+from PIL import Image, ImageTk
+from io import BytesIO
+import signal
 import os
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
-def get_database_connection():
-    """
-    Establishes connection to MongoDB Atlas using environment variables for security.
-    Returns the database connection if successful, None otherwise.
-    """
-    try:
-        # MongoDB Atlas connection string from the .env file
-        connection_string = os.getenv('MONGO_URI')
-        db_name = os.getenv('DB_NAME')  # Fetch the DB name from the environment
-
-        if not connection_string or not db_name:
-            messagebox.showerror(
-                "Configuration Error", 
-                "MongoDB connection string or database name not found in .env. Please check your environment variables."
-            )
-            return None
-
-        print(f"Using MongoDB URI: {connection_string}")
-
-        # Create a new client and connect to the server
-        client = MongoClient(connection_string, server_api=ServerApi('1'))
-
-        # Send a ping to confirm a successful connection
-        client.admin.command('ping')
-        print("Pinged your deployment. You successfully connected to MongoDB!")
-
-        # Get the database
-        db = client.get_database(db_name)  # Use the DB name from the .env file
-        if db is None:
-            print("Database is None. Connection may have failed.")
-            return None
-
-        return db
-
-    except ConfigurationError as e:
-        messagebox.showerror(
-            "Database Connection Error",
-            f"Could not connect to MongoDB Atlas: {str(e)}\nPlease check your credentials and internet connection."
+class SignatureVerificationSystem:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Enhanced Signature Verification System")
+        self.root.geometry("800x600")
+        
+        # Cloudinary configuration
+        cloudinary.config(
+            cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+            api_key=os.getenv("CLOUDINARY_API_KEY"),
+            api_secret=os.getenv("CLOUDINARY_API_SECRET")
         )
-        return None
-
-def save_signature(user_id, signature_path):
-    """
-    Saves signature information to MongoDB Atlas.
-    """
-    try:
-        # Ensure user_id and signature_path are strings and not empty
-        if not isinstance(user_id, str) or not isinstance(signature_path, str):
-            messagebox.showerror("Invalid Input", "User ID and Signature Path must be strings.")
-            return False
         
-        # Further check to make sure both are non-empty strings
-        if not user_id.strip() or not signature_path.strip():
-            messagebox.showerror("Invalid Input", "User ID and Signature Path cannot be empty.")
-            return False
+        # Create main frame
+        self.main_frame = ttk.Frame(root, padding="10")
+        self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Create and setup GUI elements
+        self.setup_gui()
+        
+        # Initialize database connection
+        self.db = self.get_database_connection()
 
-        # Get the database connection
-        db = get_database_connection()
-        if db is None:
-            return False
+        # Register the window close event
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        # Access the 'signatures' collection
-        signatures_collection = db[os.getenv('COLLECTION_NAME')]  # Collection name from the .env file
+    def get_database_connection(self):
+        """Establish a connection to MongoDB"""
+        try:
+            mongo_uri = os.getenv("MONGO_URI")
+            if not mongo_uri:
+                raise ValueError("MongoDB URI not found in environment variables")
+            client = MongoClient(mongo_uri, server_api=ServerApi('1'))
+            return client.signature_verification
+        except ConfigurationError as e:
+            messagebox.showerror("Database Error", f"Failed to connect to database: {str(e)}")
+            raise
 
-        # Explicitly convert user_id and signature_path to strings
-        user_id = str(user_id).strip()
-        signature_path = str(signature_path).strip()
+    def setup_gui(self):
+        """Setup the GUI elements like labels, buttons, etc."""
+        # User ID section
+        ttk.Label(self.main_frame, text="User ID:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.user_id_entry = ttk.Entry(self.main_frame, width=40)
+        self.user_id_entry.grid(row=0, column=1, columnspan=2, padx=5, pady=5, sticky=tk.W)
 
-        # Document to be inserted into the database
-        signature_document = {
-            "user_id": user_id,  # Ensure it's a string
-            "signature_path": signature_path,  # Ensure it's a string
-            "timestamp": str(datetime.utcnow()),  # Store the timestamp in UTC as a string
-            "status": "active"  # The signature is currently active
-        }
+        # Signature file section
+        ttk.Label(self.main_frame, text="Signature File:").grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
+        self.signature_path_entry = ttk.Entry(self.main_frame, width=40)
+        self.signature_path_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.W)
+        
+        # File selection buttons
+        ttk.Button(self.main_frame, text="Browse File", command=self.select_file).grid(row=1, column=2, padx=5, pady=5)
+        ttk.Button(self.main_frame, text="Capture from Camera", command=self.capture_from_camera).grid(row=1, column=3, padx=5, pady=5)
+        
+        # Action buttons
+        ttk.Button(self.main_frame, text="Save Signature", command=self.on_save_signature).grid(row=2, column=1, pady=20)
+        ttk.Button(self.main_frame, text="Verify Signature", command=self.on_verify_signature).grid(row=2, column=2, pady=20)
+        
+        # Status section
+        self.status_label = ttk.Label(self.main_frame, text="")
+        self.status_label.grid(row=3, column=0, columnspan=4, pady=10)
+        
+        # Progress bar
+        self.progress = ttk.Progressbar(self.main_frame, mode='indeterminate')
+        self.progress.grid(row=4, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=10)
 
-        # Insert the document into the collection
-        result = signatures_collection.insert_one(signature_document)
+    def select_file(self):
+        """Open file dialog to select a file (image/PDF)"""
+        file_path = filedialog.askopenfilename(
+            filetypes=[("All Supported Files", "*.png;*.jpg;*.jpeg;*.bmp;*.pdf"),
+                      ("Image Files", "*.png;*.jpg;*.jpeg;*.bmp"),
+                      ("PDF Files", "*.pdf"),
+                      ("All Files", "*.*")]
+        )
+        if file_path:
+            self.signature_path_entry.delete(0, tk.END)
+            self.signature_path_entry.insert(0, file_path)
 
-        # Check if the signature was inserted
-        if result.inserted_id:
-            messagebox.showinfo("Success", "Signature saved successfully!")
-            return True
+    def update_status(self, message, is_error=False):
+        """Update status label with message"""
+        self.status_label.config(text=message, foreground='red' if is_error else 'green')
+        self.root.update()
+
+    def start_progress(self):
+        """Start progress bar animation"""
+        self.progress.start(10)
+        self.root.update()
+
+    def stop_progress(self):
+        """Stop progress bar animation"""
+        self.progress.stop()
+        self.root.update()
+
+    def on_save_signature(self):
+        """Save signature to Cloudinary and the database"""
+        try:
+            user_id = self.user_id_entry.get().strip()
+            file_path = self.signature_path_entry.get().strip()
+
+            if not user_id or not file_path:
+                raise ValueError("User ID and signature file are required")
+
+            self.start_progress()
+            self.update_status("Processing signature...")
+
+            # Upload file to Cloudinary if it's a local file
+            if not file_path.startswith('http'):
+                cloudinary_url = save_signature_file(file_path, user_id)
+                if not cloudinary_url:
+                    raise Exception("Failed to upload signature to Cloudinary")
+            else:
+                cloudinary_url = file_path
+
+            # Save to database
+            if self.db.signatures.insert_one({"user_id": user_id, "signature_url": cloudinary_url}):
+                self.update_status("Signature saved successfully!")
+            else:
+                raise Exception("Failed to save to database")
+
+        except Exception as e:
+            self.update_status(f"Error: {str(e)}", True)
+        finally:
+            self.stop_progress()
+
+    def capture_from_camera(self):
+        """Invoke the camera capture function"""
+        img_path = capture_image_from_cam_into_temp()
+        if img_path:
+            self.signature_path_entry.delete(0, tk.END)
+            self.signature_path_entry.insert(0, img_path)
+            self.update_status("Captured image from camera successfully!", is_error=False)
         else:
-            messagebox.showerror("Error", "Failed to save signature to the database.")
-            return False
+            self.update_status("Error capturing image from camera.", is_error=True)
 
-    except Exception as e:
-        messagebox.showerror("Database Error", f"Error saving signature: {str(e)}")
-        return False
+    def on_verify_signature(self):
+        """Verify the user's signature against the database record"""
+        try:
+            user_id = self.user_id_entry.get().strip()
+            new_signature_path = self.signature_path_entry.get().strip()
 
-def verify_signature(user_id, new_signature_path):
-    """
-    Verifies the saved signature from MongoDB with the newly uploaded signature.
-    """
-    try:
-        # Get the database connection
-        db = get_database_connection()
-        if db is None:
-            return False
+            if not user_id or not new_signature_path:
+                raise ValueError("User ID and signature file are required")
 
-        # Access the 'signatures' collection
-        signatures_collection = db[os.getenv('COLLECTION_NAME')]  # Collection name from the .env file
+            self.start_progress()
+            self.update_status("Verifying signature...")
 
-        # Find the saved signature for the user
-        saved_signature = signatures_collection.find_one({"user_id": user_id})
+            # Retrieve existing signature from the database
+            user_record = self.db.signatures.find_one({"user_id": user_id})
+            if not user_record:
+                raise ValueError(f"No signature found for User ID: {user_id}")
 
-        if not saved_signature:
-            messagebox.showerror("Error", "No saved signature found for the user.")
-            return False
-        
-        # Retrieve the path of the saved signature (this could be used for image comparison)
-        saved_signature_path = saved_signature.get('signature_path', None)
-        
-        if not saved_signature_path:
-            messagebox.showerror("Error", "Saved signature path is missing.")
-            return False
+            existing_signature_url = user_record.get("signature_url")
+            if not existing_signature_url:
+                raise ValueError("No existing signature URL found in the database")
 
-        # Compare the old and new signature paths (this is a simple string comparison)
-        # Here, you can add a more advanced image comparison or hash-based comparison
-        if saved_signature_path == new_signature_path:
-            messagebox.showinfo("Success", "The signatures match!")
-            return True
-        else:
-            messagebox.showinfo("Result", "The signatures do not match.")
-            return False
+            # Automatically download and display the image from Cloudinary
+            if is_cloudinary_url(existing_signature_url):
+                self.display_image_from_cloudinary(existing_signature_url)
 
-    except Exception as e:
-        messagebox.showerror("Error", f"Error verifying signature: {str(e)}")
-        return False
+            # Perform signature comparison
+            similarity = match(existing_signature_url, new_signature_path)
+            if similarity == -1:
+                raise ValueError("Failed to process images for comparison")
 
-def on_save_signature():
-    """Handles the save signature action in the GUI."""
-    user_id = user_id_entry.get().strip()  # Get and strip any extra spaces from user ID
-    signature_path = signature_path_entry.get().strip()  # Get and strip any extra spaces from signature path
+            similarity_threshold = 75.0  # You can adjust this threshold as needed
+            if similarity >= similarity_threshold:
+                self.update_status(f"Signatures match! Similarity: {similarity:.2f}%", is_error=False)
+                messagebox.showinfo("Verification Successful", f"Signatures are {similarity:.2f}% similar!")
+            else:
+                self.update_status(f"Signatures do not match. Similarity: {similarity:.2f}%", is_error=True)
+                messagebox.showerror("Verification Failed", f"Signatures are only {similarity:.2f}% similar!")
 
-    if not user_id or not signature_path:  # Check if either is empty
-        messagebox.showerror("Invalid Input", "User ID and Signature Path cannot be empty.")
-        return
-    
-    if save_signature(user_id, signature_path):
-        print("Signature saved successfully!")
-    else:
-        print("Error saving signature.")
+        except Exception as e:
+            self.update_status(f"Error: {str(e)}", is_error=True)
+        finally:
+            self.stop_progress()
 
-def on_verify_signature():
-    """Handles the verify signature action in the GUI."""
-    user_id = user_id_entry.get().strip()  # Get and strip any extra spaces from user ID
-    new_signature_path = signature_path_entry.get().strip()  # Get and strip any extra spaces from new signature path
+    def display_image_from_cloudinary(self, url):
+        """Automatically download and display an image from Cloudinary in Tkinter"""
+        try:
+            # Fetch the image from Cloudinary URL
+            response = requests.get(url)
+            img_data = BytesIO(response.content)
+            
+            # Open the image using PIL
+            img = Image.open(img_data)
+            
+            # Convert image to Tkinter-compatible format
+            tk_image = ImageTk.PhotoImage(img)
+            
+            # Display the image on a Tkinter Label or Canvas
+            label = ttk.Label(self.main_frame, image=tk_image)
+            label.image = tk_image  # Keep a reference to avoid garbage collection
+            label.grid(row=5, column=0, columnspan=4)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load image from Cloudinary: {str(e)}")
 
-    if not user_id or not new_signature_path:  # Check if either is empty
-        messagebox.showerror("Invalid Input", "User ID and Signature Path cannot be empty.")
-        return
-    
-    if verify_signature(user_id, new_signature_path):
-        print("Signature verified successfully!")
-    else:
-        print("Error verifying signature.")
+    def on_close(self):
+        """Handle window close event and kill any processes"""
+        try:
+            # Perform any cleanup or kill processes here
+            # For example, if you have camera processes running, stop them:
+            # os.system('taskkill /F /IM some_process_name.exe')  # Example of killing a process
 
-def select_file(entry_field):
-    """Opens a file dialog to select a file."""
-    file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp")])
-    entry_field.delete(0, tk.END)  # Clear the current content in the entry field
-    entry_field.insert(0, file_path)  # Insert the selected file path
+            # Close the window gracefully
+            self.root.quit()
+            self.root.destroy()
+        except Exception as e:
+            print(f"Error during closing: {str(e)}")
+            self.root.quit()
+            self.root.destroy()
 
-# Create the Tkinter GUI application
-root = tk.Tk()
-root.title("Signature Verification System")
-root.geometry("600x400")
 
-# Create GUI elements
-tk.Label(root, text="User ID").grid(row=0, column=0, padx=10, pady=10)
-user_id_entry = tk.Entry(root, width=40)
-user_id_entry.grid(row=0, column=1, padx=10)
+# To launch the application
+def launch_app():
+    root = tk.Tk()
+    app = SignatureVerificationSystem(root)
+    while True:
+        try:
+            root.update_idletasks()
+            root.update()
+        except tk.TclError:
+            break
 
-tk.Label(root, text="Signature Path").grid(row=1, column=0, padx=10, pady=10)
-signature_path_entry = tk.Entry(root, width=40)
-signature_path_entry.grid(row=1, column=1, padx=10)
-
-# Browse button
-tk.Button(root, text="Browse", command=lambda: select_file(signature_path_entry)).grid(row=1, column=2)
-
-# Save Signature button
-tk.Button(root, text="Save Signature", command=on_save_signature).grid(row=2, column=1, pady=10)
-
-# Verify Signature button
-tk.Button(root, text="Verify Signature", command=on_verify_signature).grid(row=3, column=1, pady=10)
-
-root.mainloop()
+launch_app()
