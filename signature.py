@@ -8,6 +8,7 @@ import numpy as np
 from urllib.parse import urlparse
 import cloudinary.uploader
 from tkinter import messagebox
+from PIL import ImageGrab
 
 def is_cloudinary_url(url):
     """Check if the URL is a Cloudinary URL"""
@@ -146,4 +147,22 @@ def capture_image_from_cam_into_temp(sign=1):
 
     except Exception as e:
         print(f"Error capturing image: {str(e)}")
+        return None
+
+def capture_image_from_clipboard():
+    """Capture image from clipboard and save it temporarily"""
+    try:
+        image = ImageGrab.grabclipboard()
+
+        if image is None:
+            raise ValueError("No image found in clipboard.")
+
+        # Save the image as a temporary file
+        temp_path = "temp_clipboard_signature.png"
+        image.save(temp_path)
+
+        return temp_path
+
+    except Exception as e:
+        print(f"Error capturing image from clipboard: {str(e)}")
         return None
