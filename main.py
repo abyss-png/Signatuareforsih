@@ -1,129 +1,201 @@
 import tkinter as tk
-from tkinter.filedialog import askopenfilename
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
+from pymongo import MongoClient
+from pymongo.errors import ConfigurationError
+from pymongo.server_api import ServerApi
+from datetime import datetime
+from dotenv import load_dotenv
 import os
-import cv2
-from numpy import result_type
-from signature import match
 
+# Load environment variables from .env file
+load_dotenv()
 
-# Mach Threshold
-THRESHOLD = 85
+def get_database_connection():
+    """
+    Establishes connection to MongoDB Atlas using environment variables for security.
+    Returns the database connection if successful, None otherwise.
+    """
+    try:
+        # MongoDB Atlas connection string from the .env file
+        connection_string = os.getenv('MONGO_URI')
+        db_name = os.getenv('DB_NAME')  # Fetch the DB name from the environment
 
+        if not connection_string or not db_name:
+            messagebox.showerror(
+                "Configuration Error", 
+                "MongoDB connection string or database name not found in .env. Please check your environment variables."
+            )
+            return None
 
-def browsefunc(ent):
-    filename = askopenfilename(filetypes=([
-        ("image", ".jpeg"),
-        ("image", ".png"),
-        ("image", ".jpg"),
-    ]))
-    ent.delete(0, tk.END)
-    ent.insert(tk.END, filename)  # add this
+        print(f"Using MongoDB URI: {connection_string}")
 
+        # Create a new client and connect to the server
+        client = MongoClient(connection_string, server_api=ServerApi('1'))
 
-def capture_image_from_cam_into_temp(sign=1):
-    cam = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        # Send a ping to confirm a successful connection
+        client.admin.command('ping')
+        print("Pinged your deployment. You successfully connected to MongoDB!")
 
-    cv2.namedWindow("test")
+        # Get the database
+        db = client.get_database(db_name)  # Use the DB name from the .env file
+        if db is None:
+            print("Database is None. Connection may have failed.")
+            return None
 
-    # img_counter = 0
+        return db
 
-    while True:
-        ret, frame = cam.read()
-        if not ret:
-            print("failed to grab frame")
-            break
-        cv2.imshow("test", frame)
+    except ConfigurationError as e:
+        messagebox.showerror(
+            "Database Connection Error",
+            f"Could not connect to MongoDB Atlas: {str(e)}\nPlease check your credentials and internet connection."
+        )
+        return None
 
-        k = cv2.waitKey(1)
-        if k % 256 == 27:
-            # ESC pressed
-            print("Escape hit, closing...")
-            break
-        elif k % 256 == 32:
-            # SPACE pressed
-            if not os.path.isdir('temp'):
-                os.mkdir('temp', mode=0o777)  # make sure the directory exists
-            # img_name = "./temp/opencv_frame_{}.png".format(img_counter)
-            if(sign == 1):
-                img_name = "./temp/test_img1.png"
-            else:
-                img_name = "./temp/test_img2.png"
-            print('imwrite=', cv2.imwrite(filename=img_name, img=frame))
-            print("{} written!".format(img_name))
-            # img_counter += 1
-    cam.release()
-    cv2.destroyAllWindows()
-    return True
+def save_signature(user_id, signature_path):
+    """
+    Saves signature information to MongoDB Atlas.
+    """
+    try:
+        # Ensure user_id and signature_path are strings and not empty
+        if not isinstance(user_id, str) or not isinstance(signature_path, str):
+            messagebox.showerror("Invalid Input", "User ID and Signature Path must be strings.")
+            return False
+        
+        # Further check to make sure both are non-empty strings
+        if not user_id.strip() or not signature_path.strip():
+            messagebox.showerror("Invalid Input", "User ID and Signature Path cannot be empty.")
+            return False
 
+        # Get the database connection
+        db = get_database_connection()
+        if db is None:
+            return False
 
-def captureImage(ent, sign=1):
-    if(sign == 1):
-        filename = os.getcwd()+'\\temp\\test_img1.png'
+        # Access the 'signatures' collection
+        signatures_collection = db[os.getenv('COLLECTION_NAME')]  # Collection name from the .env file
+
+        # Explicitly convert user_id and signature_path to strings
+        user_id = str(user_id).strip()
+        signature_path = str(signature_path).strip()
+
+        # Document to be inserted into the database
+        signature_document = {
+            "user_id": user_id,  # Ensure it's a string
+            "signature_path": signature_path,  # Ensure it's a string
+            "timestamp": str(datetime.utcnow()),  # Store the timestamp in UTC as a string
+            "status": "active"  # The signature is currently active
+        }
+
+        # Insert the document into the collection
+        result = signatures_collection.insert_one(signature_document)
+
+        # Check if the signature was inserted
+        if result.inserted_id:
+            messagebox.showinfo("Success", "Signature saved successfully!")
+            return True
+        else:
+            messagebox.showerror("Error", "Failed to save signature to the database.")
+            return False
+
+    except Exception as e:
+        messagebox.showerror("Database Error", f"Error saving signature: {str(e)}")
+        return False
+
+def verify_signature(user_id, new_signature_path):
+    """
+    Verifies the saved signature from MongoDB with the newly uploaded signature.
+    """
+    try:
+        # Get the database connection
+        db = get_database_connection()
+        if db is None:
+            return False
+
+        # Access the 'signatures' collection
+        signatures_collection = db[os.getenv('COLLECTION_NAME')]  # Collection name from the .env file
+
+        # Find the saved signature for the user
+        saved_signature = signatures_collection.find_one({"user_id": user_id})
+
+        if not saved_signature:
+            messagebox.showerror("Error", "No saved signature found for the user.")
+            return False
+        
+        # Retrieve the path of the saved signature (this could be used for image comparison)
+        saved_signature_path = saved_signature.get('signature_path', None)
+        
+        if not saved_signature_path:
+            messagebox.showerror("Error", "Saved signature path is missing.")
+            return False
+
+        # Compare the old and new signature paths (this is a simple string comparison)
+        # Here, you can add a more advanced image comparison or hash-based comparison
+        if saved_signature_path == new_signature_path:
+            messagebox.showinfo("Success", "The signatures match!")
+            return True
+        else:
+            messagebox.showinfo("Result", "The signatures do not match.")
+            return False
+
+    except Exception as e:
+        messagebox.showerror("Error", f"Error verifying signature: {str(e)}")
+        return False
+
+def on_save_signature():
+    """Handles the save signature action in the GUI."""
+    user_id = user_id_entry.get().strip()  # Get and strip any extra spaces from user ID
+    signature_path = signature_path_entry.get().strip()  # Get and strip any extra spaces from signature path
+
+    if not user_id or not signature_path:  # Check if either is empty
+        messagebox.showerror("Invalid Input", "User ID and Signature Path cannot be empty.")
+        return
+    
+    if save_signature(user_id, signature_path):
+        print("Signature saved successfully!")
     else:
-        filename = os.getcwd()+'\\temp\\test_img2.png'
-    # messagebox.showinfo(
-    #     'SUCCESS!!!', 'Press Space Bar to click picture and ESC to exit')
-    res = None
-    res = messagebox.askquestion(
-        'Click Picture', 'Press Space Bar to click picture and ESC to exit')
-    if res == 'yes':
-        capture_image_from_cam_into_temp(sign=sign)
-        ent.delete(0, tk.END)
-        ent.insert(tk.END, filename)
-    return True
+        print("Error saving signature.")
 
+def on_verify_signature():
+    """Handles the verify signature action in the GUI."""
+    user_id = user_id_entry.get().strip()  # Get and strip any extra spaces from user ID
+    new_signature_path = signature_path_entry.get().strip()  # Get and strip any extra spaces from new signature path
 
-def capture_image_from_cam_into_temp(window, path1, path2):
-    result = match(path1=path1, path2=path2)
-    if(result <= THRESHOLD):
-        messagebox.showerror("Failure: Signatures Do Not Match",
-                             "Signatures are "+str(result)+f" % similar!!")
-        pass
+    if not user_id or not new_signature_path:  # Check if either is empty
+        messagebox.showerror("Invalid Input", "User ID and Signature Path cannot be empty.")
+        return
+    
+    if verify_signature(user_id, new_signature_path):
+        print("Signature verified successfully!")
     else:
-        messagebox.showinfo("Success: Signatures Match",
-                            "Signatures are "+str(result)+f" % similar!!")
-    return True
+        print("Error verifying signature.")
 
+def select_file(entry_field):
+    """Opens a file dialog to select a file."""
+    file_path = filedialog.askopenfilename(filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp")])
+    entry_field.delete(0, tk.END)  # Clear the current content in the entry field
+    entry_field.insert(0, file_path)  # Insert the selected file path
 
+# Create the Tkinter GUI application
 root = tk.Tk()
-root.title("Signature Matching")
-root.geometry("500x700")  # 300x200
-uname_label = tk.Label(root, text="Compare Two Signatures:", font=10)
-uname_label.place(x=90, y=50)
+root.title("Signature Verification System")
+root.geometry("600x400")
 
-img1_message = tk.Label(root, text="Signature 1", font=10)
-img1_message.place(x=10, y=120)
+# Create GUI elements
+tk.Label(root, text="User ID").grid(row=0, column=0, padx=10, pady=10)
+user_id_entry = tk.Entry(root, width=40)
+user_id_entry.grid(row=0, column=1, padx=10)
 
-image1_path_entry = tk.Entry(root, font=10)
-image1_path_entry.place(x=150, y=120)
+tk.Label(root, text="Signature Path").grid(row=1, column=0, padx=10, pady=10)
+signature_path_entry = tk.Entry(root, width=40)
+signature_path_entry.grid(row=1, column=1, padx=10)
 
-img1_capture_button = tk.Button(
-    root, text="Capture", font=10, command=lambda: captureImage(ent=image1_path_entry, sign=1))
-img1_capture_button.place(x=400, y=90)
+# Browse button
+tk.Button(root, text="Browse", command=lambda: select_file(signature_path_entry)).grid(row=1, column=2)
 
-img1_browse_button = tk.Button(
-    root, text="Browse", font=10, command=lambda: browsefunc(ent=image1_path_entry))
-img1_browse_button.place(x=400, y=140)
+# Save Signature button
+tk.Button(root, text="Save Signature", command=on_save_signature).grid(row=2, column=1, pady=10)
 
-image2_path_entry = tk.Entry(root, font=10)
-image2_path_entry.place(x=150, y=240)
+# Verify Signature button
+tk.Button(root, text="Verify Signature", command=on_verify_signature).grid(row=3, column=1, pady=10)
 
-img2_message = tk.Label(root, text="Signature 2", font=10)
-img2_message.place(x=10, y=250)
-
-img2_capture_button = tk.Button(
-    root, text="Capture", font=10, command=lambda: captureImage(ent=image2_path_entry, sign=2))
-img2_capture_button.place(x=400, y=210)
-
-img2_browse_button = tk.Button(
-    root, text="Browse", font=10, command=lambda: browsefunc(ent=image2_path_entry))
-img2_browse_button.place(x=400, y=260)
-
-compare_button = tk.Button(
-    root, text="Compare", font=10, command=lambda: capture_image_from_cam_into_temp(window=root,
-                                                                   path1=image1_path_entry.get(),
-                                                                   path2=image2_path_entry.get(),))
-
-compare_button.place(x=200, y=320)
 root.mainloop()
