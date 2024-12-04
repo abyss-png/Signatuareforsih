@@ -4,15 +4,17 @@ from pymongo import MongoClient
 from pymongo.errors import ConfigurationError
 from pymongo.server_api import ServerApi
 from dotenv import load_dotenv
-from signature import save_signature_file, match, is_cloudinary_url, capture_image_from_cam_into_temp
+from signature import save_signature_file, match, is_cloudinary_url
 import cloudinary
 import cloudinary.uploader
 import os
 import requests
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageGrab
 from io import BytesIO
 import signal
 import os
+import threading
+import time
 
 # Load environment variables
 load_dotenv()
@@ -43,6 +45,9 @@ class SignatureVerificationSystem:
         # Register the window close event
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+        # Initialize camera thread to demonstrate background process
+        self.camera_thread = None
+
     def get_database_connection(self):
         """Establish a connection to MongoDB"""
         try:
@@ -69,7 +74,7 @@ class SignatureVerificationSystem:
         
         # File selection buttons
         ttk.Button(self.main_frame, text="Browse File", command=self.select_file).grid(row=1, column=2, padx=5, pady=5)
-        ttk.Button(self.main_frame, text="Capture from Camera", command=self.capture_from_camera).grid(row=1, column=3, padx=5, pady=5)
+        ttk.Button(self.main_frame, text="Upload from Clipboard", command=self.upload_from_clipboard).grid(row=1, column=3, padx=5, pady=5)
         
         # Action buttons
         ttk.Button(self.main_frame, text="Save Signature", command=self.on_save_signature).grid(row=2, column=1, pady=20)
@@ -141,15 +146,26 @@ class SignatureVerificationSystem:
         finally:
             self.stop_progress()
 
-    def capture_from_camera(self):
-        """Invoke the camera capture function"""
-        img_path = capture_image_from_cam_into_temp()
-        if img_path:
+    def upload_from_clipboard(self):
+        """Upload an image from the clipboard"""
+        try:
+            # Grab image from clipboard
+            image = ImageGrab.grabclipboard()
+
+            if image is None:
+                raise ValueError("No image found in clipboard.")
+
+            # Save the image as a temporary file
+            temp_path = "temp_clipboard_signature.png"
+            image.save(temp_path)
+
+            # Display the image path
             self.signature_path_entry.delete(0, tk.END)
-            self.signature_path_entry.insert(0, img_path)
-            self.update_status("Captured image from camera successfully!", is_error=False)
-        else:
-            self.update_status("Error capturing image from camera.", is_error=True)
+            self.signature_path_entry.insert(0, temp_path)
+            self.update_status("Image uploaded from clipboard!", is_error=False)
+
+        except Exception as e:
+            self.update_status(f"Error: {str(e)}", True)
 
     def on_verify_signature(self):
         """Verify the user's signature against the database record"""
@@ -218,9 +234,10 @@ class SignatureVerificationSystem:
     def on_close(self):
         """Handle window close event and kill any processes"""
         try:
-            # Perform any cleanup or kill processes here
-            # For example, if you have camera processes running, stop them:
-            # os.system('taskkill /F /IM some_process_name.exe')  # Example of killing a process
+            # Gracefully terminate any running threads or processes
+            if self.camera_thread:
+                # If a camera thread is running, kill it
+                self.camera_thread.join(timeout=2)
 
             # Close the window gracefully
             self.root.quit()
